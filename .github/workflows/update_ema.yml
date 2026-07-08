@@ -1,0 +1,28 @@
+name: Daily EMA Update
+
+on:
+  schedule:
+    # 10:00 PM IST = 16:30 UTC (IST is UTC+5:30)
+    - cron: "30 16 * * *"
+  workflow_dispatch:      # allows manual "Run workflow" button too
+
+jobs:
+  update-ema:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run EMA updater
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python gsheet_ema_updater.py
