@@ -24,7 +24,7 @@ from google.oauth2.service_account import Credentials
 import yfinance as yf
 
 # ---------- CONFIG ----------
-SHEET_NAME = "EMA OF STOCKS"     # exact name of the Google Sheet
+SHEET_NAME = "My Stock Sheet"     # exact name of the Google Sheet
 WORKSHEET_NAME = "Sheet1"         # tab name inside the spreadsheet
 EMA_10 = 10
 EMA_FAST = 7
