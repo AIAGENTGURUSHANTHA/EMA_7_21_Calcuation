@@ -10,6 +10,15 @@ Column F : Bullish / Bearish  (EMA7 > EMA21 => Bullish, else Bearish)
            - Bullish rows filled light green
            - Bearish rows filled light red
 
+Fixes included:
+  1. Ticker normalization: "NSE:TCS" or "TCS" -> "TCS.NS" (Yahoo Finance
+     format). Already-correct tickers (e.g. "RELIANCE.NS") pass through
+     unchanged.
+  2. Yahoo Finance often blocks requests from GitHub Actions / cloud
+     datacenter IPs, returning empty data even for valid tickers. This
+     script uses a browser-impersonating session (curl_cffi) and retries
+     with a short delay to work around that.
+
 Credentials come from the GOOGLE_CREDENTIALS environment variable
 (a GitHub Secret holding the full service-account JSON) — nothing
 sensitive is stored in the repo itself.
@@ -17,11 +26,13 @@ sensitive is stored in the repo itself.
 
 import os
 import json
+import time
 from datetime import datetime, timezone, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
 import yfinance as yf
+from curl_cffi import requests as cffi_requests
 
 # ---------- CONFIG ----------
 SHEET_NAME = "My Stock Sheet"     # exact name of the Google Sheet
@@ -30,12 +41,18 @@ EMA_10 = 10
 EMA_FAST = 7
 EMA_SLOW = 21
 HISTORY_DAYS = "3mo"
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 3
 # -----------------------------
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 LIGHT_GREEN = {"red": 0.80, "green": 0.93, "blue": 0.80}
 LIGHT_RED = {"red": 0.96, "green": 0.80, "blue": 0.80}
+
+# Browser-impersonating session -- helps avoid Yahoo Finance blocking
+# requests that come from cloud/datacenter IPs like GitHub Actions runners.
+SESSION = cffi_requests.Session(impersonate="chrome")
 
 
 def connect_to_sheet():
@@ -56,21 +73,62 @@ def get_tickers(sheet) -> list:
     return [t.strip().upper() for t in col_a[1:] if t.strip()]
 
 
+def normalize_ticker(raw: str) -> str:
+    """
+    Convert whatever format is in the sheet into a valid Yahoo Finance
+    ticker for NSE-listed stocks.
+
+    Examples:
+        "NSE:TCS"        -> "TCS.NS"
+        "NSE:BAJAJ-AUTO"  -> "BAJAJ-AUTO.NS"
+        "TCS"             -> "TCS.NS"
+        "RELIANCE.NS"     -> "RELIANCE.NS"   (unchanged, already correct)
+        "AAPL"            -> "AAPL"          (US tickers left alone)
+    """
+    t = raw.strip().upper()
+    if t.startswith("NSE:"):
+        t = t[4:]
+    if t.startswith("BSE:"):
+        t = t[4:] + ".BO"
+        return t
+    # If it already has a Yahoo suffix, leave it as-is
+    if t.endswith(".NS") or t.endswith(".BO"):
+        return t
+    # Otherwise assume NSE and append .NS
+    # (Skip this assumption if you also track US tickers like AAPL/MSFT --
+    #  in that case, maintain an explicit exchange column instead.)
+    return t + ".NS"
+
+
 def calculate_emas(ticker: str):
     """Return (ema10, ema7, ema21) for a ticker, or (None, None, None) on failure."""
-    try:
-        data = yf.download(ticker, period=HISTORY_DAYS, progress=False)
-        if data.empty:
-            print(f"  No data for {ticker}")
-            return None, None, None
-        close = data["Close"]
-        ema10 = close.ewm(span=EMA_10, adjust=False).mean().iloc[-1]
-        ema7 = close.ewm(span=EMA_FAST, adjust=False).mean().iloc[-1]
-        ema21 = close.ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1]
-        return round(float(ema10), 2), round(float(ema7), 2), round(float(ema21), 2)
-    except Exception as e:
-        print(f"  Error fetching {ticker}: {e}")
-        return None, None, None
+    yahoo_ticker = normalize_ticker(ticker)
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            data = yf.download(
+                yahoo_ticker,
+                period=HISTORY_DAYS,
+                progress=False,
+                session=SESSION,
+            )
+            if data.empty:
+                print(f"  Attempt {attempt}: No data for {yahoo_ticker}")
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+
+            close = data["Close"]
+            ema10 = close.ewm(span=EMA_10, adjust=False).mean().iloc[-1]
+            ema7 = close.ewm(span=EMA_FAST, adjust=False).mean().iloc[-1]
+            ema21 = close.ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1]
+            return round(float(ema10), 2), round(float(ema7), 2), round(float(ema21), 2)
+
+        except Exception as e:
+            print(f"  Attempt {attempt}: Error fetching {yahoo_ticker}: {e}")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    print(f"  Giving up on {yahoo_ticker} after {MAX_RETRIES} attempts")
+    return None, None, None
 
 
 def update_sheet():
